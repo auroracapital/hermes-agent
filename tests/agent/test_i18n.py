@@ -206,7 +206,140 @@ def test_locales_dir_falls_back_to_data_scheme(tmp_path, monkeypatch):
     fake_pkg.mkdir(parents=True)
     monkeypatch.setattr(i18n, "__file__", str(fake_pkg / "i18n.py"))
 
+    # Neutralize the user-base branch (checked before the data scheme) so this
+    # test pins the data-scheme fallback specifically -- otherwise a real
+    # ``pip install --user`` host resolves ~/.local/locales first.
+    user_base_no_locales = tmp_path / "user-base"
+    user_base_no_locales.mkdir()
+    monkeypatch.setattr(i18n.site, "getuserbase", lambda: str(user_base_no_locales))
+
     # Stand up a fake data scheme containing locales/.
+    data_root = tmp_path / "data-scheme"
+    (data_root / "locales").mkdir(parents=True)
+    real_get_path = sysconfig.get_path
+
+    def fake_get_path(name, *args, **kwargs):
+        if name == "data":
+            return str(data_root)
+        return real_get_path(name, *args, **kwargs)
+
+    monkeypatch.setattr(i18n.sysconfig, "get_path", fake_get_path)
+
+    assert i18n._locales_dir() == data_root / "locales"
+
+
+def test_locales_dir_resolves_pip_user_base(tmp_path, monkeypatch):
+    """``pip install --user`` puts data-files under ``site.getuserbase()/locales``
+    (e.g. ~/.local/locales), which none of the sysconfig schemes return. Without
+    an explicit user-base check, every catalog lookup misses and t() returns raw
+    keys for all localized replies. Regression for the --user layout."""
+    import sysconfig
+
+    # No env override.
+    monkeypatch.delenv("HERMES_BUNDLED_LOCALES", raising=False)
+
+    # Force the source-adjacent path to a location with no locales/ dir.
+    fake_pkg = tmp_path / "site-packages" / "agent"
+    fake_pkg.mkdir(parents=True)
+    monkeypatch.setattr(i18n, "__file__", str(fake_pkg / "i18n.py"))
+
+    # Stand up a fake user base containing locales/ (the --user data-files spot).
+    user_base = tmp_path / "user-base"
+    (user_base / "locales").mkdir(parents=True)
+    monkeypatch.setattr(i18n.site, "getuserbase", lambda: str(user_base))
+    monkeypatch.setattr(
+        i18n.site,
+        "getusersitepackages",
+        lambda: str(fake_pkg.parent),
+    )
+
+    # Ensure the sysconfig data-scheme fallback does NOT accidentally resolve,
+    # so this test pins the user-base branch specifically.
+    empty_scheme = tmp_path / "empty-scheme"
+    empty_scheme.mkdir()
+    real_get_path = sysconfig.get_path
+    monkeypatch.setattr(
+        i18n.sysconfig,
+        "get_path",
+        lambda name, *a, **k: str(empty_scheme),
+    )
+
+    assert i18n._locales_dir() == user_base / "locales"
+
+
+def test_locales_dir_user_base_precedes_data_scheme(tmp_path, monkeypatch):
+    """When both the user base and a sysconfig data scheme carry locales/, the
+    user base wins -- it is checked first in the resolution ladder."""
+    monkeypatch.delenv("HERMES_BUNDLED_LOCALES", raising=False)
+
+    fake_pkg = tmp_path / "site-packages" / "agent"
+    fake_pkg.mkdir(parents=True)
+    monkeypatch.setattr(i18n, "__file__", str(fake_pkg / "i18n.py"))
+
+    user_base = tmp_path / "user-base"
+    (user_base / "locales").mkdir(parents=True)
+    monkeypatch.setattr(i18n.site, "getuserbase", lambda: str(user_base))
+    monkeypatch.setattr(
+        i18n.site,
+        "getusersitepackages",
+        lambda: str(fake_pkg.parent),
+    )
+
+    data_root = tmp_path / "data-scheme"
+    (data_root / "locales").mkdir(parents=True)
+    monkeypatch.setattr(
+        i18n.sysconfig,
+        "get_path",
+        lambda name, *a, **k: str(data_root) if name == "data" else "",
+    )
+
+    assert i18n._locales_dir() == user_base / "locales"
+
+
+def test_locales_dir_non_user_install_ignores_stale_user_base(tmp_path, monkeypatch):
+    """A venv/system install must not read catalogs left by a user install."""
+    monkeypatch.delenv("HERMES_BUNDLED_LOCALES", raising=False)
+
+    active_pkg = tmp_path / "venv" / "site-packages" / "agent"
+    active_pkg.mkdir(parents=True)
+    monkeypatch.setattr(i18n, "__file__", str(active_pkg / "i18n.py"))
+
+    stale_user_base = tmp_path / "user-base"
+    (stale_user_base / "locales").mkdir(parents=True)
+    monkeypatch.setattr(i18n.site, "getuserbase", lambda: str(stale_user_base))
+    monkeypatch.setattr(
+        i18n.site,
+        "getusersitepackages",
+        lambda: str(tmp_path / "user-site"),
+    )
+
+    active_data = tmp_path / "active-data"
+    (active_data / "locales").mkdir(parents=True)
+    monkeypatch.setattr(
+        i18n.sysconfig,
+        "get_path",
+        lambda name, *a, **k: str(active_data) if name == "data" else "",
+    )
+
+    assert i18n._locales_dir() == active_data / "locales"
+
+
+def test_locales_dir_user_base_error_is_non_fatal(tmp_path, monkeypatch):
+    """If site.getuserbase() raises (unusual embedded/frozen interpreters),
+    resolution must fall through to the sysconfig data scheme, not crash."""
+    import sysconfig
+
+    monkeypatch.delenv("HERMES_BUNDLED_LOCALES", raising=False)
+
+    fake_pkg = tmp_path / "site-packages" / "agent"
+    fake_pkg.mkdir(parents=True)
+    monkeypatch.setattr(i18n, "__file__", str(fake_pkg / "i18n.py"))
+
+    def _boom():
+        raise RuntimeError("no user base")
+
+    monkeypatch.setattr(i18n.site, "getuserbase", _boom)
+
     data_root = tmp_path / "data-scheme"
     (data_root / "locales").mkdir(parents=True)
     real_get_path = sysconfig.get_path
