@@ -34,7 +34,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(300)  # overrides the global --timeout=30; cold-CI wheel build + venv + pip can exceed it
 def test_installed_wheel_renders_i18n_strings(tmp_path):
     # 1. Build the wheel from the current tree.
     wheel_dir = tmp_path / "wheel"
@@ -92,7 +91,94 @@ def test_installed_wheel_renders_i18n_strings(tmp_path):
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(300)  # overrides the global --timeout=30; cold-CI sdist build can exceed it
+def test_user_scheme_wheel_resolves_user_base_locales(tmp_path):
+    """A real ``pip install --user`` must resolve ``$PYTHONUSERBASE/locales``."""
+    wheel_dir = tmp_path / "wheel"
+    base_python = getattr(sys, "_base_executable", None) or sys.executable
+    build = subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(wheel_dir),
+            ".",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert build.returncode == 0, f"uv build failed:\n{build.stderr}"
+    wheels = glob.glob(str(wheel_dir / "*.whl"))
+    assert wheels, "no wheel produced"
+
+    user_base = tmp_path / "user-base"
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "PYTHONPATH",
+            "HERMES_BUNDLED_LOCALES",
+            "PYTHONNOUSERSITE",
+            "VIRTUAL_ENV",
+        )
+    }
+    env["PYTHONUSERBASE"] = str(user_base)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+
+    install = subprocess.run(
+        [
+            base_python,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--user",
+            "--break-system-packages",
+            "--no-deps",
+            "--force-reinstall",
+            "pyyaml==6.0.3",
+            wheels[0],
+        ],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+    )
+    assert install.returncode == 0, (
+        "pip install --user failed:\n"
+        f"stdout: {install.stdout}\nstderr: {install.stderr}"
+    )
+
+    probe = (
+        "from agent import i18n;"
+        "from pathlib import Path;"
+        "import site, sys;"
+        "resolved = i18n._locales_dir();"
+        "expected = Path(site.getuserbase()) / 'locales';"
+        "rendered = i18n.t('gateway.reset.header_default', lang='en');"
+        "print(resolved); print(repr(rendered));"
+        "sys.exit(0 if resolved == expected and rendered != "
+        "'gateway.reset.header_default' else 1)"
+    )
+    run = subprocess.run(
+        [base_python, "-c", probe],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert run.returncode == 0, (
+        "user-scheme wheel failed to resolve its installed locale catalogs:\n"
+        f"stdout: {run.stdout}\nstderr: {run.stderr}"
+    )
+
+
+@pytest.mark.integration
 def test_built_sdist_ships_locale_catalogs(tmp_path):
     """The sdist must carry locales/ too.
 
