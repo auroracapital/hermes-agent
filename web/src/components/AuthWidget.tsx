@@ -42,10 +42,16 @@ function truncateUserId(id: string): string {
 
 export function AuthWidget({ className }: AuthWidgetProps) {
   const [me, setMe] = useState<AuthMeResponse | null>(null);
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(
+    () =>
+      typeof window === "undefined" || !window.__HERMES_AUTH_REQUIRED__,
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (typeof window === "undefined" || !window.__HERMES_AUTH_REQUIRED__) {
+      return;
+    }
     let cancelled = false;
     api
       .getAuthMe()
