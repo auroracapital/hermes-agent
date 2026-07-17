@@ -3,6 +3,7 @@
 import sqlite3
 import time
 import json
+import logging
 import pytest
 
 import hermes_state
@@ -4096,16 +4097,10 @@ class TestConcurrentWriteSafety:
         assert len(msgs) == 1
         assert msgs[0]["content"] == "hello after lock"
 
-    def test_sqlite_timeout_is_at_least_30s(self, db):
-        """Connection timeout should be >= 30s to survive CLI/gateway contention."""
-        # Access the underlying connection timeout via sqlite3 introspection.
-        # There is no public API, so we check the kwarg via the module default.
-        import inspect
-        from hermes_state import SessionDB as _SessionDB
-        src = inspect.getsource(_SessionDB.__init__)
-        assert "30" in src, (
-            "SQLite timeout should be at least 30s to handle CLI/gateway lock contention"
-        )
+    def test_sqlite_timeout_is_short_for_jittered_retries(self, db):
+        """SQLite should fail fast so application-level jitter can de-convoy writers."""
+        timeout_ms = db._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout_ms == 1000
 
 
 # =========================================================================
@@ -4137,6 +4132,29 @@ class TestVacuum:
 
 
 class TestOptimizeFts:
+    def test_bounded_merge_uses_finite_page_budget(self, db):
+        """Automatic maintenance has a real FTS5 page bound, not optimize."""
+        statements = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            assert db.merge_fts(max_pages=64) == 2
+        finally:
+            db._conn.set_trace_callback(None)
+
+        merge_statements = [
+            " ".join(statement.lower().split())
+            for statement in statements
+            if "values('merge'" in statement.lower()
+        ]
+        assert len(merge_statements) == 2
+        assert all("values('merge', 64)" in statement for statement in merge_statements)
+        assert not any("'optimize'" in statement for statement in statements)
+
+    @pytest.mark.parametrize("max_pages", [0, -1, True, 1.5, "64"])
+    def test_bounded_merge_rejects_invalid_page_budget(self, db, max_pages):
+        with pytest.raises(ValueError, match="positive integer"):
+            db.merge_fts(max_pages=max_pages)
+
     def test_optimize_returns_index_count(self, db):
         """A fresh DB has both FTS indexes; optimize merges both."""
         db.create_session(session_id="s1", source="cli")
@@ -4193,39 +4211,61 @@ class TestOptimizeFts:
         # Search still works after repeated optimization.
         assert len(db.search_messages("repeat")) == 1
 
-    def test_write_path_optimizes_fts_on_cadence(self, db, monkeypatch):
-        """Writes periodically merge FTS segments so they never accumulate
-        into the tens-of-thousands that lengthen the write-lock hold and
-        starve competing writers ("database is locked")."""
-        db._OPTIMIZE_EVERY_N_WRITES = 5
-        calls = {"n": 0}
-        real_optimize = db.optimize_fts
+    def test_write_path_uses_bounded_merge_not_optimize(self, db, monkeypatch):
+        """The cadence invokes finite merge and never automatic optimize."""
+        db._FTS_MERGE_EVERY_N_WRITES = 5
+        merge_budgets = []
+        optimize_calls = []
 
-        def _counting_optimize():
-            calls["n"] += 1
-            return real_optimize()
+        monkeypatch.setattr(
+            db,
+            "merge_fts",
+            lambda max_pages: merge_budgets.append(max_pages) or 2,
+        )
+        monkeypatch.setattr(
+            db,
+            "optimize_fts",
+            lambda: optimize_calls.append(True) or 2,
+        )
 
-        monkeypatch.setattr(db, "optimize_fts", _counting_optimize)
-        # create_session is write #1; appends are #2.. -> #5 and #10 trigger.
+        # create_session is write #1; appends are #2.. -> #5 and #10 merge.
         db.create_session(session_id="s1", source="cli")
         for i in range(9):
             db.append_message(session_id="s1", role="user", content=f"needle {i}")
-        assert calls["n"] == 2
-        # The auto-merge is layout-only: search is unaffected.
+        assert merge_budgets == [db._FTS_MERGE_MAX_PAGES] * 2
+        assert optimize_calls == []
         assert len(db.search_messages("needle")) == 9
 
-    def test_write_path_optimize_failure_never_breaks_write(self, db, monkeypatch):
-        """A failing periodic optimize must not fail the surrounding write."""
-        db._OPTIMIZE_EVERY_N_WRITES = 2
+    def test_write_path_merge_failure_never_breaks_write(self, db, monkeypatch):
+        """A failing periodic merge must not fail the surrounding write."""
+        db._FTS_MERGE_EVERY_N_WRITES = 2
 
-        def _boom():
-            raise sqlite3.OperationalError("simulated optimize failure")
+        def _boom(max_pages):
+            raise sqlite3.OperationalError("simulated merge failure")
 
-        monkeypatch.setattr(db, "optimize_fts", _boom)
+        monkeypatch.setattr(db, "merge_fts", _boom)
         db.create_session(session_id="s1", source="cli")  # write #1
         # write #2 trips the cadence; the swallowed failure must not propagate.
         db.append_message(session_id="s1", role="user", content="still persists")
         assert len(db.get_messages("s1")) == 1
+
+    def test_slow_maintenance_log_omits_path_and_message_data(
+        self, db, monkeypatch, caplog
+    ):
+        """Timing diagnostics expose operation + duration only."""
+        secret = "private-message-sentinel"
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(session_id="s1", role="user", content=secret)
+        monkeypatch.setattr(db, "_SLOW_MAINTENANCE_SECONDS", 0.0)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=hermes_state.__name__):
+            db._try_merge_fts()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("operation=fts_merge" in message for message in messages)
+        assert all(str(db.db_path) not in message for message in messages)
+        assert all(secret not in message for message in messages)
 
 
 class TestAutoMaintenance:
