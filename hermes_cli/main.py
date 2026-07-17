@@ -9317,17 +9317,20 @@ def cmd_update(args):
 def _cmd_update_pip(args):
     """Update Hermes via pip (for PyPI installs)."""
     from hermes_cli import __version__
-    from hermes_cli.config import is_uv_tool_install
+    from hermes_cli.config import is_user_site_install, is_uv_tool_install
 
     print(f"→ Current version: {__version__}")
     print("→ Checking PyPI for updates...")
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
-    # Keep managed uv current before using it.
-    update_managed_uv()
-
-    uv = ensure_uv()
+    user_site_install = is_user_site_install(PROJECT_ROOT)
+    uv = None
+    if not user_site_install:
+        # User-site installs use the running interpreter's pip directly, so
+        # avoid bootstrapping or updating a separate package manager.
+        update_managed_uv()
+        uv = ensure_uv()
     in_venv = sys.prefix != sys.base_prefix
     # pipx-managed installs live under .../pipx/venvs/<name>/...
     pipx_managed = "pipx" in sys.prefix.split(os.sep)
@@ -9340,7 +9343,17 @@ def _cmd_update_pip(args):
     # set it for them.
     export_virtualenv = False
 
-    if is_uv_tool_install():
+    if user_site_install:
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--upgrade",
+            "hermes-agent",
+        ]
+    elif is_uv_tool_install():
         if not uv:
             print("✗ Detected a uv-tool install but managed uv install failed.")
             print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
@@ -9364,10 +9377,21 @@ def _cmd_update_pip(args):
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"]
 
     print(f"→ Running: {' '.join(cmd)}")
-    run_kwargs = {}
-    if export_virtualenv:
-        run_kwargs["env"] = {**os.environ, "VIRTUAL_ENV": sys.prefix}
-    result = subprocess.run(cmd, **run_kwargs)
+    run_env = None
+    if user_site_install:
+        # Services can inherit a launcher venv that is unrelated to the
+        # interpreter owning this user-site package.
+        run_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() != "VIRTUAL_ENV"
+        }
+    elif export_virtualenv:
+        run_env = {**os.environ, "VIRTUAL_ENV": sys.prefix}
+    if run_env is None:
+        result = subprocess.run(cmd)
+    else:
+        result = subprocess.run(cmd, env=run_env)
     if result.returncode != 0:
         print("✗ Update failed")
         sys.exit(1)
@@ -9461,14 +9485,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
     git_dir = PROJECT_ROOT / ".git"
 
     if not git_dir.exists():
+        from hermes_cli.config import is_site_packages_install
+
+        if is_site_packages_install(PROJECT_ROOT):
+            _cmd_update_pip(args)
+            return
         if sys.platform == "win32":
             use_zip_update = True
         else:
-            from hermes_cli.config import detect_install_method
-            method = detect_install_method(PROJECT_ROOT)
-            if method == "pip":
-                _cmd_update_pip(args)
-                return
             print("✗ Not a git repository. Please reinstall:")
             print(
                 "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"

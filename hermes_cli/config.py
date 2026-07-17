@@ -517,6 +517,60 @@ def is_uv_tool_install() -> bool:
     return False
 
 
+def _is_in_interpreter_site_packages(
+    project_root: Optional[Path], *, include_system: bool
+) -> bool:
+    """Conservatively match a root against this interpreter's site paths."""
+    import site
+
+    try:
+        root = (project_root or get_project_root()).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+    candidates = []
+    try:
+        user_site = site.getusersitepackages()
+        if user_site:
+            candidates.append(user_site)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        pass
+
+    if include_system:
+        try:
+            system_sites = site.getsitepackages()
+            if isinstance(system_sites, (str, os.PathLike)):
+                candidates.append(system_sites)
+            else:
+                candidates.extend(system_sites)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            pass
+
+    for candidate in candidates:
+        try:
+            site_root = Path(candidate).resolve()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if root == site_root or site_root in root.parents:
+            return True
+    return False
+
+
+def is_site_packages_install(project_root: Optional[Path] = None) -> bool:
+    """Return True only for code under this interpreter's site-packages.
+
+    This positive layout check distinguishes installed packages from source or
+    Windows ZIP layouts that merely lack ``.git`` metadata. Detection failures
+    deliberately return False so update routing preserves the source fallback.
+    """
+    return _is_in_interpreter_site_packages(project_root, include_system=True)
+
+
+def is_user_site_install(project_root: Optional[Path] = None) -> bool:
+    """Return True when the running package lives in Python's user site."""
+    return _is_in_interpreter_site_packages(project_root, include_system=False)
+
+
 def recommended_update_command_for_method(method: str) -> str:
     """Return the update command or guidance for a given install method."""
     if method == "nixos":
@@ -528,6 +582,8 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "pip":
         if is_uv_tool_install():
             return "uv tool upgrade hermes-agent"
+        if is_user_site_install():
+            return f"{sys.executable} -m pip install --user --upgrade hermes-agent"
         import shutil
         if shutil.which("uv"):
             return "uv pip install --upgrade hermes-agent"
