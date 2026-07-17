@@ -216,6 +216,23 @@ class TestProviderListFlag:
 
 
 # ---------------------------------------------------------------------------
+# Password-only gate entry
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordOnlyGateEntry:
+    def test_unauthenticated_html_uses_password_form_not_oauth(self, gated_app):
+        entry = gated_app.get("/", follow_redirects=False)
+
+        assert entry.status_code == 302
+        assert entry.headers["location"] == "/login?next=%2F"
+
+        login = gated_app.get(entry.headers["location"])
+        assert login.status_code == 200
+        assert '<form class="provider-form" data-provider="testpw"' in login.text
+
+
+# ---------------------------------------------------------------------------
 # /auth/password-login — end-to-end through the real middleware
 # ---------------------------------------------------------------------------
 
