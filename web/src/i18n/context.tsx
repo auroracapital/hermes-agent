@@ -50,32 +50,37 @@ function getInitialLocale(): Locale {
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
-  const [loadRevision, setLoadRevision] = useState(0);
   const [loaded, setLoaded] = useState<{
     locale: Locale;
     translations: Translations;
   }>({ locale: "en", translations: en });
 
   useEffect(() => {
+    if (loaded.locale === locale) return;
     let cancelled = false;
     loadTranslations(locale)
       .then((translations) => {
         if (!cancelled) setLoaded({ locale, translations });
       })
       .catch(() => {
-        // Leave the previous successful locale loaded. The context falls back
-        // to English while this locale is unavailable, and selecting the same
-        // locale again increments loadRevision so a transient chunk failure
-        // can be retried without a page reload.
+        if (cancelled) return;
+        // Keep the picker, persisted preference, and rendered strings aligned.
+        // Reverting to the last successful locale also means selecting the
+        // failed locale again is a normal value change that retries the chunk.
+        setLocaleState(loaded.locale);
+        try {
+          localStorage.setItem(STORAGE_KEY, loaded.locale);
+        } catch {
+          // ignore
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [loadRevision, locale]);
+  }, [loaded.locale, locale]);
 
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
-    setLoadRevision((revision) => revision + 1);
     try {
       localStorage.setItem(STORAGE_KEY, l);
     } catch {
