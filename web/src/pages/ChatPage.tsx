@@ -36,6 +36,12 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 import { normalizeSessionTitle } from "@/lib/chat-title";
+import {
+  createLearnSeedQueue,
+  observeLearnSeed,
+  restoreLearnSeed,
+  takeLearnSeed,
+} from "@/lib/learn-seed-queue";
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -143,6 +149,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // collapses the host's box, so ResizeObserver never fires on return).
   const syncMetricsRef = useRef<(() => void) | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const learnQueueRef = useRef(createLearnSeedQueue(searchParams.get("learn")));
+  const learnSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
   // In gated (OAuth) mode the server intentionally omits the session token —
@@ -232,6 +240,50 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     () => buildTerminalTheme(terminalBg, terminalFg),
     [terminalBg, terminalFg],
   );
+  const terminalThemeRef = useRef(terminalTheme);
+
+  const sendNextLearnSeed = useCallback(
+    function sendNextLearnSeed() {
+      if (learnSendTimerRef.current) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const seed = takeLearnSeed(learnQueueRef.current);
+      if (!seed) return;
+
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (next.get("learn") === seed) next.delete("learn");
+          return next;
+        },
+        { replace: true },
+      );
+
+      learnSendTimerRef.current = setTimeout(() => {
+        learnSendTimerRef.current = null;
+        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(`/learn ${seed}`.trim() + "\r");
+        } else {
+          restoreLearnSeed(learnQueueRef.current, seed);
+        }
+        sendNextLearnSeed();
+      }, 800);
+    },
+    [setSearchParams],
+  );
+
+  const learnSeed = searchParams.get("learn");
+  useEffect(() => {
+    observeLearnSeed(learnQueueRef.current, learnSeed);
+    sendNextLearnSeed();
+  }, [learnSeed, sendNextLearnSeed]);
+
+  useEffect(() => {
+    return () => {
+      if (learnSendTimerRef.current) clearTimeout(learnSendTimerRef.current);
+    };
+  }, []);
 
   // The dashboard keeps ChatPage mounted persistently so the PTY survives tab
   // switches. That is great for ordinary /chat navigation, but it means query
@@ -432,7 +484,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Browser-embedded chat runs the TUI in inline mode. Keep transcript
       // history in xterm.js so the browser wheel can scroll it directly.
       scrollback: 5000,
-      theme: terminalTheme,
+      theme: terminalThemeRef.current,
     });
     termRef.current = term;
 
@@ -736,24 +788,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // reflows once after the PTY boots, which is imperceptible.
       ws.send(`\x1b[RESIZE:${term.cols};${term.rows}]`);
       // One-shot: a ?learn=<text> param (set by the Skills page "Learn a
-      // skill" panel) is typed into the composer as a /learn command once the
-      // PTY is up. /learn resolves via command.dispatch → a normal agent turn,
-      // so this reuses the existing composer path — no special PTY protocol.
-      const learnSeed = searchParams.get("learn");
-      if (learnSeed) {
-        const next = new URLSearchParams(searchParams);
-        next.delete("learn");
-        setSearchParams(next, { replace: true });
-        const cmd = `/learn ${learnSeed}`.trim();
-        // Delay so Ink's composer has mounted and grabbed focus before input.
-        setTimeout(() => {
-          try {
-            wsRef.current?.send(cmd + "\r");
-          } catch {
-            /* PTY not ready / closed — user can retype */
-          }
-        }, 800);
-      }
+      // skill" panel) is typed into the composer after Ink has mounted. The
+      // queue also covers parameters that arrive while this persistent page
+      // is already mounted and restores an unsent command after reconnect.
+      sendNextLearnSeed();
     };
 
     ws.onmessage = (ev) => {
@@ -910,7 +948,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         reconnectTimerRef.current = null;
       }
     };
-  }, [channel, clearReconnectTimer, resumeParam, scopedProfile, reconnectNonce]);
+  }, [
+    channel,
+    clearReconnectTimer,
+    reconnectNonce,
+    resumeParam,
+    scopedProfile,
+    sendNextLearnSeed,
+  ]);
 
   // When the user returns to the chat tab (isActive: false → true), the
   // terminal host just transitioned from display:none to display:flex.
@@ -960,6 +1005,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // Keep the live xterm theme in sync when the active theme's terminal
   // colors change (e.g. user switches to a custom YAML theme mid-session).
   useEffect(() => {
+    terminalThemeRef.current = terminalTheme;
     const term = termRef.current;
     if (!term) return;
     term.options.theme = terminalTheme;

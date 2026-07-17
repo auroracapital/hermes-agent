@@ -1,4 +1,8 @@
-import { useSyncExternalStore } from "react";
+import {
+  createElement,
+  useSyncExternalStore,
+  type ComponentType,
+} from "react";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import {
   getPluginComponent,
@@ -26,7 +30,7 @@ export function PluginPage({ name }: { name: string }) {
   );
 
   if (Component) {
-    return <Component />;
+    return <PluginRenderer component={Component} />;
   }
 
   if (loadError) {
@@ -55,6 +59,14 @@ export function PluginPage({ name }: { name: string }) {
       <span>{t.common.loading}</span>
     </div>
   );
+}
+
+function PluginRenderer({ component }: PluginRendererProps) {
+  return createElement(component);
+}
+
+interface PluginRendererProps {
+  component: ComponentType;
 }
 
 function formatPluginError(code: string, t: Translations): string {

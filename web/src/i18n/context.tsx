@@ -1,71 +1,38 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Locale, Translations } from "./types";
 import { en } from "./en";
-import { zh } from "./zh";
-import { zhHant } from "./zh-hant";
-import { ja } from "./ja";
-import { de } from "./de";
-import { es } from "./es";
-import { fr } from "./fr";
-import { tr } from "./tr";
-import { uk } from "./uk";
-import { af } from "./af";
-import { ko } from "./ko";
-import { it } from "./it";
-import { ga } from "./ga";
-import { pt } from "./pt";
-import { ru } from "./ru";
-import { hu } from "./hu";
+import { I18nContext, type I18nContextValue } from "./i18n-context";
 
-const TRANSLATIONS: Record<Locale, Translations> = {
-  en,
-  zh,
-  "zh-hant": zhHant,
-  ja,
-  de,
-  es,
-  fr,
-  tr,
-  uk,
-  af,
-  ko,
-  it,
-  ga,
-  pt,
-  ru,
-  hu,
+const TRANSLATION_LOADERS: Record<Locale, () => Promise<Translations>> = {
+  en: async () => en,
+  zh: async () => (await import("./zh")).zh,
+  "zh-hant": async () => (await import("./zh-hant")).zhHant,
+  ja: async () => (await import("./ja")).ja,
+  de: async () => (await import("./de")).de,
+  es: async () => (await import("./es")).es,
+  fr: async () => (await import("./fr")).fr,
+  tr: async () => (await import("./tr")).tr,
+  uk: async () => (await import("./uk")).uk,
+  af: async () => (await import("./af")).af,
+  ko: async () => (await import("./ko")).ko,
+  it: async () => (await import("./it")).it,
+  ga: async () => (await import("./ga")).ga,
+  pt: async () => (await import("./pt")).pt,
+  ru: async () => (await import("./ru")).ru,
+  hu: async () => (await import("./hu")).hu,
 };
 
-// Display metadata for the language picker — endonym (native name) so users
-// recognize their language even if they don't speak the current UI language.
-// Exposed as a constant so the LanguageSwitcher and any future settings page
-// can share the same list.
-//
-// We intentionally do NOT pair locales with country flags. Languages are not
-// countries (English ≠ GB, Portuguese ≠ PT, Spanish ≠ ES, Chinese variants ≠
-// any single jurisdiction). Endonyms are unambiguous and avoid the political
-// mismapping that flag pairings inevitably create.
-export const LOCALE_META: Record<Locale, { name: string }> = {
-  en: { name: "English" },
-  zh: { name: "简体中文" },
-  "zh-hant": { name: "繁體中文" },
-  ja: { name: "日本語" },
-  de: { name: "Deutsch" },
-  es: { name: "Español" },
-  fr: { name: "Français" },
-  tr: { name: "Türkçe" },
-  uk: { name: "Українська" },
-  af: { name: "Afrikaans" },
-  ko: { name: "한국어" },
-  it: { name: "Italiano" },
-  ga: { name: "Gaeilge" },
-  pt: { name: "Português" },
-  ru: { name: "Русский" },
-  hu: { name: "Magyar" },
-};
-
-const SUPPORTED_LOCALES = Object.keys(TRANSLATIONS) as Locale[];
+const TRANSLATION_CACHE = new Map<Locale, Translations>([["en", en]]);
+const SUPPORTED_LOCALES = Object.keys(TRANSLATION_LOADERS) as Locale[];
 const STORAGE_KEY = "hermes-locale";
+
+async function loadTranslations(locale: Locale): Promise<Translations> {
+  const cached = TRANSLATION_CACHE.get(locale);
+  if (cached) return cached;
+  const translations = await TRANSLATION_LOADERS[locale]();
+  TRANSLATION_CACHE.set(locale, translations);
+  return translations;
+}
 
 function isLocale(value: string): value is Locale {
   return (SUPPORTED_LOCALES as string[]).includes(value);
@@ -81,20 +48,36 @@ function getInitialLocale(): Locale {
   return "en";
 }
 
-interface I18nContextValue {
-  locale: Locale;
-  setLocale: (l: Locale) => void;
-  t: Translations;
-}
-
-const I18nContext = createContext<I18nContextValue>({
-  locale: "en",
-  setLocale: () => {},
-  t: en,
-});
-
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
+  const [loaded, setLoaded] = useState<{
+    locale: Locale;
+    translations: Translations;
+  }>({ locale: "en", translations: en });
+
+  useEffect(() => {
+    if (loaded.locale === locale) return;
+    let cancelled = false;
+    loadTranslations(locale)
+      .then((translations) => {
+        if (!cancelled) setLoaded({ locale, translations });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Keep the picker, persisted preference, and rendered strings aligned.
+        // Reverting to the last successful locale also means selecting the
+        // failed locale again is a normal value change that retries the chunk.
+        setLocaleState(loaded.locale);
+        try {
+          localStorage.setItem(STORAGE_KEY, loaded.locale);
+        } catch {
+          // ignore
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded.locale, locale]);
 
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
@@ -108,7 +91,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const value: I18nContextValue = {
     locale,
     setLocale,
-    t: TRANSLATIONS[locale],
+    t: loaded.locale === locale ? loaded.translations : en,
   };
 
   return (
@@ -116,8 +99,4 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       {children}
     </I18nContext.Provider>
   );
-}
-
-export function useI18n() {
-  return useContext(I18nContext);
 }

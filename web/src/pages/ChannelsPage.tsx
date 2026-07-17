@@ -35,6 +35,10 @@ import type {
 import { useModalBehavior } from "@/hooks/useModalBehavior";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, themedBody } from "@/lib/utils";
+import {
+  synchronizeWhatsAppMode,
+  type WhatsAppModeSelection,
+} from "@/lib/whatsapp-mode";
 
 // State → badge mapping. The backend emits a small, fixed vocabulary plus
 // whatever the live gateway runtime reports (connected/disconnected/fatal).
@@ -585,18 +589,24 @@ function WhatsAppOnboardingPanel({
   const [phase, setPhase] = useState<
     "idle" | "starting" | "waiting" | "connected" | "applying"
   >("idle");
-  const [mode, setMode] = useState<"bot" | "self-chat">(
-    configuredMode ?? "bot",
-  );
+  const [modeSelection, setModeSelection] = useState<WhatsAppModeSelection>(() => ({
+    configuredMode,
+    value: configuredMode ?? "bot",
+  }));
+  const synchronizedModeSelection =
+    !setup && phase === "idle"
+      ? synchronizeWhatsAppMode(modeSelection, configuredMode)
+      : modeSelection;
+  if (synchronizedModeSelection !== modeSelection) {
+    setModeSelection(synchronizedModeSelection);
+  }
+  const mode = synchronizedModeSelection.value;
+  const setMode = (value: "bot" | "self-chat") => {
+    setModeSelection({ configuredMode, value });
+  };
   const [allowedUsers, setAllowedUsers] = useState("");
   const [error, setError] = useState("");
   const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    if (!setup && phase === "idle" && configuredMode) {
-      setMode(configuredMode);
-    }
-  }, [configuredMode, phase, setup]);
 
   const updateQr = useCallback(async (payload?: string | null) => {
     if (!payload) return;
@@ -674,6 +684,7 @@ function WhatsAppOnboardingPanel({
   };
 
   const start = async () => {
+    setModeSelection({ configuredMode, value: mode });
     setPhase("starting");
     setError("");
     setQrDataUrl("");

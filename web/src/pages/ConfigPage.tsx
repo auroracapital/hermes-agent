@@ -118,10 +118,11 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [configPath, setConfigPath] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<string>("");
+  const [selectedCategory, setActiveCategory] = useState<string>("");
   const [confirmReset, setConfirmReset] = useState(false);
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const yamlRequestRef = useRef(0);
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
 
@@ -193,37 +194,31 @@ export default function ConfigPage() {
       .catch(() => {});
   }, []);
 
-  // Set active category when categories load
-  useEffect(() => {
-    if (categoryOrder.length > 0 && !activeCategory) {
-      setActiveCategory(categoryOrder[0]);
-    }
-  }, [categoryOrder, activeCategory]);
+  const activeCategory = selectedCategory || categoryOrder[0] || "";
 
-  // Load YAML when switching to YAML mode
+  // Invalidate an in-flight YAML read after unmount. Toggling the mode off
+  // invalidates it separately in toggleYamlMode below.
   useEffect(() => {
-    if (yamlMode) {
-      setYamlLoading(true);
-      api
-        .getConfigRaw()
-        .then((resp) => setYamlText(resp.yaml))
-        .catch(() => showToast(t.config.failedToLoadRaw, "error"))
-        .finally(() => setYamlLoading(false));
-    }
-  }, [yamlMode]);
+    return () => {
+      yamlRequestRef.current += 1;
+    };
+  }, []);
 
   /* ---- Categories ---- */
-  const categories = useMemo(() => {
-    if (!schema) return [];
-    const allCats = [
-      ...new Set(
-        Object.values(schema).map((s) => String(s.category ?? "general")),
-      ),
-    ];
-    const ordered = categoryOrder.filter((c) => allCats.includes(c));
-    const extra = allCats.filter((c) => !categoryOrder.includes(c)).sort();
-    return [...ordered, ...extra];
-  }, [schema, categoryOrder]);
+  const allCategories = schema
+    ? [
+        ...new Set(
+          Object.values(schema).map((s) => String(s.category ?? "general")),
+        ),
+      ]
+    : [];
+  const orderedCategories = categoryOrder.filter((category) =>
+    allCategories.includes(category),
+  );
+  const extraCategories = allCategories
+    .filter((category) => !categoryOrder.includes(category))
+    .sort();
+  const categories = [...orderedCategories, ...extraCategories];
 
   /* ---- Category field counts ---- */
   const categoryCounts = useMemo(() => {
@@ -293,6 +288,35 @@ export default function ConfigPage() {
       showToast(`${t.config.failedToSaveYaml}: ${e}`, "error");
     } finally {
       setYamlSaving(false);
+    }
+  };
+
+  const loadYaml = () => {
+    const requestId = ++yamlRequestRef.current;
+    setYamlLoading(true);
+    api
+      .getConfigRaw()
+      .then((resp) => {
+        if (yamlRequestRef.current === requestId) setYamlText(resp.yaml);
+      })
+      .catch(() => {
+        if (yamlRequestRef.current === requestId) {
+          showToast(t.config.failedToLoadRaw, "error");
+        }
+      })
+      .finally(() => {
+        if (yamlRequestRef.current === requestId) setYamlLoading(false);
+      });
+  };
+
+  const toggleYamlMode = () => {
+    const nextYamlMode = !yamlMode;
+    setYamlMode(nextYamlMode);
+    if (nextYamlMode) {
+      loadYaml();
+    } else {
+      yamlRequestRef.current += 1;
+      setYamlLoading(false);
     }
   };
 
@@ -486,7 +510,7 @@ export default function ConfigPage() {
           <Button
             size="sm"
             outlined={!yamlMode}
-            onClick={() => setYamlMode(!yamlMode)}
+            onClick={toggleYamlMode}
             prefix={yamlMode ? <FormInput /> : <Code />}
           >
             {yamlMode ? t.common.form : "YAML"}

@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -61,7 +63,8 @@ import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { ConfirmDialog } from "@nous-research/ui/ui/components/confirm-dialog";
 import { cn } from "@/lib/utils";
 import { SidebarFooter } from "@/components/SidebarFooter";
-import { SidebarStatusStrip, gatewayLine } from "@/components/SidebarStatusStrip";
+import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
+import { gatewayLine } from "@/components/sidebar-status";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { AuthWidget } from "@/components/AuthWidget";
@@ -72,25 +75,6 @@ import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-import ConfigPage from "@/pages/ConfigPage";
-import DocsPage from "@/pages/DocsPage";
-import EnvPage from "@/pages/EnvPage";
-import FilesPage from "@/pages/FilesPage";
-import SessionsPage from "@/pages/SessionsPage";
-import LogsPage from "@/pages/LogsPage";
-import AnalyticsPage from "@/pages/AnalyticsPage";
-import ModelsPage from "@/pages/ModelsPage";
-import CronPage from "@/pages/CronPage";
-import ProfilesPage from "@/pages/ProfilesPage";
-import ProfileBuilderPage from "@/pages/ProfileBuilderPage";
-import SkillsPage from "@/pages/SkillsPage";
-import PluginsPage from "@/pages/PluginsPage";
-import McpPage from "@/pages/McpPage";
-import PairingPage from "@/pages/PairingPage";
-import ChannelsPage from "@/pages/ChannelsPage";
-import WebhooksPage from "@/pages/WebhooksPage";
-import SystemPage from "@/pages/SystemPage";
-import ChatPage from "@/pages/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -102,6 +86,26 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
 
+const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
+const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
+const ChatPage = lazy(() => import("@/pages/ChatPage"));
+const ConfigPage = lazy(() => import("@/pages/ConfigPage"));
+const CronPage = lazy(() => import("@/pages/CronPage"));
+const DocsPage = lazy(() => import("@/pages/DocsPage"));
+const EnvPage = lazy(() => import("@/pages/EnvPage"));
+const FilesPage = lazy(() => import("@/pages/FilesPage"));
+const LogsPage = lazy(() => import("@/pages/LogsPage"));
+const McpPage = lazy(() => import("@/pages/McpPage"));
+const ModelsPage = lazy(() => import("@/pages/ModelsPage"));
+const PairingPage = lazy(() => import("@/pages/PairingPage"));
+const PluginsPage = lazy(() => import("@/pages/PluginsPage"));
+const ProfileBuilderPage = lazy(() => import("@/pages/ProfileBuilderPage"));
+const ProfilesPage = lazy(() => import("@/pages/ProfilesPage"));
+const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
+const SkillsPage = lazy(() => import("@/pages/SkillsPage"));
+const SystemPage = lazy(() => import("@/pages/SystemPage"));
+const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
+
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
 }
@@ -112,6 +116,18 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
     return null;
   }
   return <Navigate to="/sessions" replace />;
+}
+
+function RouteLoadingFallback() {
+  return (
+    <div
+      className="flex min-h-32 min-w-0 flex-1 items-center justify-center"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <Spinner />
+    </div>
+  );
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -737,17 +753,19 @@ export default function App() {
                 )}
               >
                 <ProfileKeyedRoutes>
-                  <Routes>
-                    {routes.map(({ key, path, element }) => (
-                      <Route key={key} path={path} element={element} />
-                    ))}
-                    <Route
-                      path="*"
-                      element={
-                        <UnknownRouteFallback pluginsLoading={pluginsLoading} />
-                      }
-                    />
-                  </Routes>
+                  <Suspense fallback={<RouteLoadingFallback />}>
+                    <Routes>
+                      {routes.map(({ key, path, element }) => (
+                        <Route key={key} path={path} element={element} />
+                      ))}
+                      <Route
+                        path="*"
+                        element={
+                          <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                        }
+                      />
+                    </Routes>
+                  </Suspense>
                 </ProfileKeyedRoutes>
 
                 {embeddedChat &&
@@ -774,7 +792,11 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatPage isActive={isChatRoute} />
+                      <Suspense
+                        fallback={isChatRoute ? <RouteLoadingFallback /> : null}
+                      >
+                        <ChatPage isActive={isChatRoute} />
+                      </Suspense>
                     </div>
                   ))}
               </div>
@@ -909,12 +931,8 @@ function SidebarSystemActions({
   const [updateConfirmChecking, setUpdateConfirmChecking] = useState(false);
 
   useEffect(() => {
-    if (!updateConfirmOpen) {
-      setUpdateConfirmInfo(null);
-      return;
-    }
+    if (!updateConfirmOpen) return;
     let cancelled = false;
-    setUpdateConfirmChecking(true);
     api
       .checkHermesUpdate(false)
       .then((info) => {
@@ -930,6 +948,18 @@ function SidebarSystemActions({
       cancelled = true;
     };
   }, [updateConfirmOpen]);
+
+  const openUpdateConfirm = () => {
+    setUpdateConfirmInfo(null);
+    setUpdateConfirmChecking(true);
+    setUpdateConfirmOpen(true);
+  };
+
+  const closeUpdateConfirm = () => {
+    setUpdateConfirmOpen(false);
+    setUpdateConfirmInfo(null);
+    setUpdateConfirmChecking(false);
+  };
 
   const updateConfirmDescription = useMemo(() => {
     if (updateConfirmInfo?.behind && updateConfirmInfo.behind > 0) {
@@ -970,7 +1000,7 @@ function SidebarSystemActions({
       return;
     }
     if (action === "update") {
-      setUpdateConfirmOpen(true);
+      openUpdateConfirm();
       return;
     }
     void runAction(action);
@@ -986,7 +1016,7 @@ function SidebarSystemActions({
   };
 
   const confirmUpdate = () => {
-    setUpdateConfirmOpen(false);
+    closeUpdateConfirm();
     void runAction("update");
     navigate("/sessions");
     onNavigate();
@@ -1056,7 +1086,7 @@ function SidebarSystemActions({
         updateConfirmChecking ? t.common.loading : updateConfirmDescription
       }
       loading={pendingAction === "update" || updateConfirmChecking}
-      onCancel={() => setUpdateConfirmOpen(false)}
+      onCancel={closeUpdateConfirm}
       onConfirm={confirmUpdate}
       open={updateConfirmOpen}
       title={t.status.updateHermesConfirmTitle ?? `${t.status.updateHermes}?`}
