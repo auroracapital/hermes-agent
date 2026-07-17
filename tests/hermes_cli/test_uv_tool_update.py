@@ -116,6 +116,70 @@ class TestIsUvToolInstall:
             assert config.is_uv_tool_install() is False
 
 
+class TestIsPipxInstall:
+    def test_detects_posix_pipx_venv(self):
+        from hermes_cli import config
+
+        with patch.object(
+            config.sys, "prefix", "/home/user/.local/pipx/venvs/hermes-agent"
+        ):
+            assert config.is_pipx_install() is True
+
+    def test_detects_windows_pipx_venv(self):
+        from hermes_cli import config
+
+        with patch.object(
+            config.sys,
+            "prefix",
+            r"C:\Users\user\pipx\venvs\hermes-agent",
+        ):
+            assert config.is_pipx_install() is True
+
+    def test_unrelated_venv_is_not_pipx(self):
+        from hermes_cli import config
+
+        with patch.object(config.sys, "prefix", "/home/user/venvs/hermes-agent"), \
+             patch.object(config.sys, "executable", "/usr/bin/python3"):
+            assert config.is_pipx_install() is False
+
+
+class TestIsSitePackagesInstall:
+    def test_exact_user_site_root_is_packaged(self, tmp_path):
+        from hermes_cli import config
+
+        user_site = tmp_path / "user-site"
+        with patch("site.getusersitepackages", return_value=str(user_site)), \
+             patch("site.getsitepackages", return_value=[]):
+            assert config.is_site_packages_install(user_site) is True
+            assert config.is_user_site_install(user_site) is True
+
+    def test_descendant_of_system_site_root_is_packaged(self, tmp_path):
+        from hermes_cli import config
+
+        system_site = tmp_path / "system-site"
+        project_root = system_site / "hermes_agent"
+        with patch("site.getusersitepackages", return_value=str(tmp_path / "user-site")), \
+             patch("site.getsitepackages", return_value=[str(system_site)]):
+            assert config.is_site_packages_install(project_root) is True
+            assert config.is_user_site_install(project_root) is False
+
+    def test_unrelated_root_is_not_packaged(self, tmp_path):
+        from hermes_cli import config
+
+        project_root = tmp_path / "source-checkout"
+        with patch("site.getusersitepackages", return_value=str(tmp_path / "user-site")), \
+             patch("site.getsitepackages", return_value=[str(tmp_path / "system-site")]):
+            assert config.is_site_packages_install(project_root) is False
+
+    def test_detection_failure_is_not_packaged(self, tmp_path):
+        from hermes_cli import config
+
+        with patch("site.getusersitepackages", side_effect=OSError("unavailable")), \
+             patch("site.getsitepackages", side_effect=OSError("unavailable")):
+            assert config.is_site_packages_install(tmp_path) is False
+            assert config.is_user_site_install(tmp_path) is False
+
+
 # ---------------------------------------------------------------------------
 # recommended_update_command_for_method
 # ---------------------------------------------------------------------------
@@ -148,6 +212,38 @@ class TestRecommendedUpdateCommandForUvTool:
              patch.object(config, "is_uv_tool_install", return_value=False):
             cmd = config.recommended_update_command_for_method("pip")
             assert cmd == "uv pip install --upgrade hermes-agent"
+
+    def test_user_site_install_recommends_running_interpreter(self):
+        from hermes_cli import config
+
+        with patch.object(config.sys, "executable", "/usr/local/bin/python3.12"), \
+             patch.object(config, "is_uv_tool_install", return_value=False), \
+             patch.object(config, "is_user_site_install", return_value=True):
+            cmd = config.recommended_update_command_for_method("pip")
+
+        assert cmd == (
+            "/usr/local/bin/python3.12 -m pip install --user --upgrade hermes-agent"
+        )
+
+    def test_uv_tool_ownership_outranks_pipx_and_user_site(self):
+        from hermes_cli import config
+
+        with patch.object(config, "is_uv_tool_install", return_value=True), \
+             patch.object(config, "is_pipx_install", return_value=True), \
+             patch.object(config, "is_user_site_install", return_value=True):
+            cmd = config.recommended_update_command_for_method("pip")
+
+        assert cmd == "uv tool upgrade hermes-agent"
+
+    def test_pipx_ownership_outranks_user_site(self):
+        from hermes_cli import config
+
+        with patch.object(config, "is_uv_tool_install", return_value=False), \
+             patch.object(config, "is_pipx_install", return_value=True), \
+             patch.object(config, "is_user_site_install", return_value=True):
+            cmd = config.recommended_update_command_for_method("pip")
+
+        assert cmd == "pipx upgrade hermes-agent"
 
     def test_no_uv_falls_back_to_plain_pip(self):
         from hermes_cli import config
@@ -190,6 +286,22 @@ class TestCmdUpdatePipUsesUvTool:
             _cmd_update_pip(SimpleNamespace())
 
         assert mock_run.call_args[0][0] == ["/usr/local/bin/uv", "tool", "upgrade", "hermes-agent"]
+
+    @patch("subprocess.run")
+    def test_uv_tool_ownership_outranks_pipx_and_user_site(self, mock_run):
+        from hermes_cli.main import _cmd_update_pip
+
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("shutil.which", return_value="/usr/local/bin/uv"), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=True), \
+             patch("hermes_cli.config.is_pipx_install", return_value=True), \
+             patch("hermes_cli.config.is_user_site_install") as user_site:
+            _cmd_update_pip(SimpleNamespace())
+
+        assert mock_run.call_args[0][0] == [
+            "/usr/local/bin/uv", "tool", "upgrade", "hermes-agent"
+        ]
+        user_site.assert_not_called()
 
     @patch("subprocess.run")
     def test_runs_uv_pip_install_when_not_uv_tool(self, mock_run):
@@ -282,6 +394,26 @@ class TestCmdUpdatePipInstallLayouts:
         assert "env" not in mock_run.call_args.kwargs
 
     @patch("subprocess.run")
+    def test_pipx_ownership_outranks_user_site(self, mock_run):
+        from hermes_cli.main import _cmd_update_pip
+
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        def _which(name):
+            return {"uv": "/usr/bin/uv", "pipx": "/usr/bin/pipx"}.get(name)
+
+        with patch("shutil.which", side_effect=_which), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=True), \
+             patch("hermes_cli.config.is_user_site_install") as user_site:
+            _cmd_update_pip(SimpleNamespace())
+
+        assert mock_run.call_args[0][0] == [
+            "/usr/bin/pipx", "upgrade", "hermes-agent"
+        ]
+        user_site.assert_not_called()
+
+    @patch("subprocess.run")
     def test_pipx_layout_without_pipx_binary_treated_as_venv(
         self, mock_run, monkeypatch
     ):
@@ -340,3 +472,238 @@ class TestCmdUpdatePipInstallLayouts:
         assert "--system" not in cmd
         assert cmd == ["/usr/bin/uv", "pip", "install", "--upgrade", "hermes-agent"]
         assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == "/home/u/.hermes/hermes-agent/venv"
+
+    @patch("subprocess.run")
+    def test_user_site_install_uses_running_python_and_clears_foreign_virtualenv(
+        self, mock_run, monkeypatch
+    ):
+        from hermes_cli import main as hm
+
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        monkeypatch.setattr(hm.sys, "executable", "/usr/local/bin/python3.12")
+        monkeypatch.setenv("VIRTUAL_ENV", "/opt/unrelated")
+
+        with patch("hermes_cli.config.is_user_site_install", return_value=True), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.managed_uv.update_managed_uv") as mock_update_uv, \
+             patch("hermes_cli.managed_uv.ensure_uv") as mock_ensure_uv:
+            hm._cmd_update_pip(SimpleNamespace())
+
+        assert mock_run.call_args[0][0] == [
+            "/usr/local/bin/python3.12",
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--upgrade",
+            "hermes-agent",
+        ]
+        assert "VIRTUAL_ENV" not in mock_run.call_args.kwargs["env"]
+        mock_update_uv.assert_not_called()
+        mock_ensure_uv.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("user_site_install", "expected_scheme"),
+        [(True, "nt_user"), (False, None)],
+    )
+    @patch("subprocess.run")
+    def test_windows_site_package_update_quarantines_installed_scripts_shim(
+        self,
+        mock_run,
+        monkeypatch,
+        tmp_path,
+        user_site_install,
+        expected_scheme,
+    ):
+        from hermes_cli import main as hm
+
+        scripts_dir = tmp_path / "Python312" / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        shim = scripts_dir / "hermes.exe"
+        shim.write_bytes(b"old")
+        monkeypatch.setattr(hm.sys, "executable", r"C:\Python312\python.exe")
+
+        def _get_path(name, scheme=None):
+            assert name == "scripts"
+            assert scheme == expected_scheme
+            return str(scripts_dir)
+
+        def _install(cmd, *, env=None):
+            assert not shim.exists()
+            shim.write_bytes(b"new")
+
+        with patch.object(hm, "_is_windows", return_value=True), \
+             patch.object(hm, "_load_console_script_names", return_value=["hermes"]), \
+             patch.object(hm, "_run_install_with_heartbeat", side_effect=_install) as install, \
+             patch("sysconfig.get_preferred_scheme", return_value="nt_user"), \
+             patch("sysconfig.get_path", side_effect=_get_path), \
+             patch("shutil.which", return_value=None), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=False), \
+             patch(
+                 "hermes_cli.config.is_user_site_install",
+                 return_value=user_site_install,
+             ):
+            hm._cmd_update_pip(SimpleNamespace())
+
+        install.assert_called_once()
+        cmd = install.call_args.args[0]
+        assert ("--user" in cmd) is user_site_install
+        assert shim.read_bytes() == b"new"
+        quarantined = list(scripts_dir.glob("hermes.exe.old.*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == b"old"
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_windows_site_package_update_restores_shim_after_failure(
+        self,
+        mock_run,
+        monkeypatch,
+        tmp_path,
+    ):
+        from hermes_cli import main as hm
+
+        scripts_dir = tmp_path / "Python312" / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        shim = scripts_dir / "hermes.exe"
+        shim.write_bytes(b"old")
+        monkeypatch.setattr(hm.sys, "executable", r"C:\Python312\python.exe")
+
+        def _get_path(name, scheme=None):
+            assert name == "scripts"
+            assert scheme == "nt_user"
+            return str(scripts_dir)
+
+        def _install(cmd, *, env=None):
+            assert not shim.exists()
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with patch.object(hm, "_is_windows", return_value=True), \
+             patch.object(hm, "_load_console_script_names", return_value=["hermes"]), \
+             patch.object(hm, "_run_install_with_heartbeat", side_effect=_install), \
+             patch("sysconfig.get_preferred_scheme", return_value="nt_user"), \
+             patch("sysconfig.get_path", side_effect=_get_path), \
+             patch("shutil.which", return_value=None), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=False), \
+             patch("hermes_cli.config.is_user_site_install", return_value=True), \
+             pytest.raises(SystemExit) as exc_info:
+            hm._cmd_update_pip(SimpleNamespace())
+
+        assert exc_info.value.code == 1
+        assert shim.read_bytes() == b"old"
+        assert list(scripts_dir.glob("hermes.exe.old.*")) == []
+        mock_run.assert_not_called()
+
+
+class TestCmdUpdateImplPackageRouting:
+    @staticmethod
+    def _args():
+        return SimpleNamespace(
+            yes=True,
+            backup=False,
+            force=True,
+            force_venv=True,
+            branch=None,
+        )
+
+    @staticmethod
+    def _site_patches(user_site, system_site):
+        return (
+            patch("site.getusersitepackages", return_value=str(user_site)),
+            patch("site.getsitepackages", return_value=[str(system_site)]),
+        )
+
+    def test_windows_packaged_no_git_uses_pip_not_zip(self, tmp_path, monkeypatch):
+        from hermes_cli import main as hm
+
+        project_root = tmp_path / "Lib" / "site-packages"
+        project_root.mkdir(parents=True)
+        monkeypatch.setattr(hm, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(hm.sys, "platform", "win32")
+        user_patch, system_patch = self._site_patches(
+            tmp_path / "user-site", project_root
+        )
+
+        with patch.object(hm, "_is_windows", return_value=True), \
+             patch.object(hm, "_run_pre_update_backup"), \
+             patch.object(hm, "_pause_windows_gateways_for_update", return_value=None), \
+             patch.object(hm, "_cmd_update_pip") as update_pip, \
+             patch.object(hm, "_update_via_zip") as update_zip, \
+             user_patch, system_patch:
+            hm._cmd_update_impl(self._args(), gateway_mode=True)
+
+        update_pip.assert_called_once()
+        assert update_pip.call_args.args == (self._args(),)
+        update_zip.assert_not_called()
+
+    def test_windows_source_no_git_keeps_zip_recovery(self, tmp_path, monkeypatch):
+        from hermes_cli import main as hm
+
+        project_root = tmp_path / "source-checkout"
+        project_root.mkdir()
+        monkeypatch.setattr(hm, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(hm.sys, "platform", "win32")
+        user_patch, system_patch = self._site_patches(
+            tmp_path / "user-site", tmp_path / "system-site"
+        )
+
+        with patch.object(hm, "_is_windows", return_value=False), \
+             patch.object(hm, "_run_pre_update_backup"), \
+             patch.object(hm, "_pause_windows_gateways_for_update", return_value=None), \
+             patch.object(hm, "_resume_windows_gateways_after_update"), \
+             patch.object(hm, "_discard_lockfile_churn"), \
+             patch.object(hm, "_get_origin_url", return_value=""), \
+             patch.object(hm, "_cmd_update_pip") as update_pip, \
+             patch.object(hm, "_update_via_zip") as update_zip, \
+             user_patch, system_patch:
+            hm._cmd_update_impl(self._args(), gateway_mode=True)
+
+        update_zip.assert_called_once_with(self._args())
+        update_pip.assert_not_called()
+
+    def test_posix_packaged_no_git_uses_pip(self, tmp_path, monkeypatch):
+        from hermes_cli import main as hm
+
+        project_root = tmp_path / "site-packages" / "hermes_agent"
+        project_root.mkdir(parents=True)
+        monkeypatch.setattr(hm, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(hm.sys, "platform", "linux")
+        user_patch, system_patch = self._site_patches(
+            tmp_path / "user-site", tmp_path / "site-packages"
+        )
+
+        with patch.object(hm, "_is_windows", return_value=False), \
+             patch.object(hm, "_run_pre_update_backup"), \
+             patch.object(hm, "_pause_windows_gateways_for_update", return_value=None), \
+             patch.object(hm, "_cmd_update_pip") as update_pip, \
+             user_patch, system_patch:
+            hm._cmd_update_impl(self._args(), gateway_mode=True)
+
+        update_pip.assert_called_once_with(self._args())
+
+    def test_posix_source_no_git_keeps_reinstall_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from hermes_cli import main as hm
+
+        project_root = tmp_path / "source-checkout"
+        project_root.mkdir()
+        monkeypatch.setattr(hm, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(hm.sys, "platform", "linux")
+        user_patch, system_patch = self._site_patches(
+            tmp_path / "user-site", tmp_path / "system-site"
+        )
+
+        with patch.object(hm, "_is_windows", return_value=False), \
+             patch.object(hm, "_run_pre_update_backup"), \
+             patch.object(hm, "_pause_windows_gateways_for_update", return_value=None), \
+             patch.object(hm, "_cmd_update_pip") as update_pip, \
+             user_patch, system_patch, \
+             pytest.raises(SystemExit) as exc_info:
+            hm._cmd_update_impl(self._args(), gateway_mode=True)
+
+        assert exc_info.value.code == 1
+        assert "Not a git repository" in capsys.readouterr().out
+        update_pip.assert_not_called()
