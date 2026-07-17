@@ -7187,6 +7187,24 @@ def _venv_scripts_dir() -> Path | None:
     return scripts if scripts.is_dir() else None
 
 
+def _pip_update_scripts_dir(*, user_site: bool) -> Path | None:
+    """Return the Windows Scripts directory targeted by a pip update."""
+    if not _is_windows():
+        return None
+
+    import sysconfig
+
+    try:
+        if user_site:
+            scheme = sysconfig.get_preferred_scheme("user")
+            scripts = sysconfig.get_path("scripts", scheme=scheme)
+        else:
+            scripts = sysconfig.get_path("scripts")
+    except (AttributeError, KeyError, OSError, TypeError, ValueError):
+        return None
+    return Path(scripts) if scripts else None
+
+
 def _hermes_exe_shims(scripts_dir: Path) -> list[Path]:
     """Entry-point shims that uv may try to rewrite during ``pip install -e .``.
 
@@ -9317,14 +9335,24 @@ def cmd_update(args):
 def _cmd_update_pip(args):
     """Update Hermes via pip (for PyPI installs)."""
     from hermes_cli import __version__
-    from hermes_cli.config import is_user_site_install, is_uv_tool_install
+    from hermes_cli.config import (
+        is_pipx_install,
+        is_user_site_install,
+        is_uv_tool_install,
+    )
 
     print(f"→ Current version: {__version__}")
     print("→ Checking PyPI for updates...")
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
-    user_site_install = is_user_site_install(PROJECT_ROOT)
+    # Explicit tool-manager layouts own their environments. A broad user-site
+    # path match must never redirect their updates through ``pip --user``.
+    uv_tool_install = is_uv_tool_install()
+    pipx_managed = is_pipx_install()
+    user_site_install = False
+    if not uv_tool_install and not pipx_managed:
+        user_site_install = is_user_site_install(PROJECT_ROOT)
     uv = None
     if not user_site_install:
         # User-site installs use the running interpreter's pip directly, so
@@ -9332,8 +9360,6 @@ def _cmd_update_pip(args):
         update_managed_uv()
         uv = ensure_uv()
     in_venv = sys.prefix != sys.base_prefix
-    # pipx-managed installs live under .../pipx/venvs/<name>/...
-    pipx_managed = "pipx" in sys.prefix.split(os.sep)
     pipx = shutil.which("pipx") if pipx_managed else None
 
     # Only the ``uv pip install`` path inside a venv needs VIRTUAL_ENV
@@ -9342,18 +9368,9 @@ def _cmd_update_pip(args):
     # operate on a named environment and ignore VIRTUAL_ENV, so we don't
     # set it for them.
     export_virtualenv = False
+    rewrites_interpreter_scripts = False
 
-    if user_site_install:
-        cmd = [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--user",
-            "--upgrade",
-            "hermes-agent",
-        ]
-    elif is_uv_tool_install():
+    if uv_tool_install:
         if not uv:
             print("✗ Detected a uv-tool install but managed uv install failed.")
             print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
@@ -9363,8 +9380,20 @@ def _cmd_update_pip(args):
         # pipx owns its own venv; ``pipx upgrade`` is the only correct path.
         # Matches scripts/auto-update.sh, which already uses pipx upgrade.
         cmd = [pipx, "upgrade", "hermes-agent"]
+    elif user_site_install:
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--upgrade",
+            "hermes-agent",
+        ]
+        rewrites_interpreter_scripts = True
     elif uv:
         cmd = [uv, "pip", "install", "--upgrade", "hermes-agent"]
+        rewrites_interpreter_scripts = True
         if in_venv:
             # Launcher shim runs the venv interpreter but doesn't export
             # VIRTUAL_ENV; without it uv errors "No virtual environment found".
@@ -9375,6 +9404,7 @@ def _cmd_update_pip(args):
             cmd.insert(3, "--system")
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"]
+        rewrites_interpreter_scripts = True
 
     print(f"→ Running: {' '.join(cmd)}")
     run_env = None
@@ -9388,11 +9418,20 @@ def _cmd_update_pip(args):
         }
     elif export_virtualenv:
         run_env = {**os.environ, "VIRTUAL_ENV": sys.prefix}
-    if run_env is None:
+    install_failed = False
+    if rewrites_interpreter_scripts and _is_windows():
+        scripts_dir = _pip_update_scripts_dir(user_site=user_site_install)
+        try:
+            _run_quarantined_install(cmd, env=run_env, scripts_dir=scripts_dir)
+        except subprocess.CalledProcessError:
+            install_failed = True
+    elif run_env is None:
         result = subprocess.run(cmd)
+        install_failed = result.returncode != 0
     else:
         result = subprocess.run(cmd, env=run_env)
-    if result.returncode != 0:
+        install_failed = result.returncode != 0
+    if install_failed:
         print("✗ Update failed")
         sys.exit(1)
 

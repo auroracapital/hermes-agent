@@ -517,6 +517,18 @@ def is_uv_tool_install() -> bool:
     return False
 
 
+def is_pipx_install() -> bool:
+    """Return True when the running interpreter belongs to a pipx venv."""
+
+    def _has_pipx_venv_marker(path: str) -> bool:
+        normalized = "/" + str(path).replace("\\", "/").strip("/").lower() + "/"
+        return "/pipx/venvs/" in normalized
+
+    return _has_pipx_venv_marker(sys.prefix) or _has_pipx_venv_marker(
+        sys.executable or ""
+    )
+
+
 def _is_in_interpreter_site_packages(
     project_root: Optional[Path], *, include_system: bool
 ) -> bool:
@@ -582,6 +594,8 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "pip":
         if is_uv_tool_install():
             return "uv tool upgrade hermes-agent"
+        if is_pipx_install():
+            return "pipx upgrade hermes-agent"
         if is_user_site_install():
             return f"{sys.executable} -m pip install --user --upgrade hermes-agent"
         import shutil

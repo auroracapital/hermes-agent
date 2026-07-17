@@ -116,6 +116,33 @@ class TestIsUvToolInstall:
             assert config.is_uv_tool_install() is False
 
 
+class TestIsPipxInstall:
+    def test_detects_posix_pipx_venv(self):
+        from hermes_cli import config
+
+        with patch.object(
+            config.sys, "prefix", "/home/user/.local/pipx/venvs/hermes-agent"
+        ):
+            assert config.is_pipx_install() is True
+
+    def test_detects_windows_pipx_venv(self):
+        from hermes_cli import config
+
+        with patch.object(
+            config.sys,
+            "prefix",
+            r"C:\Users\user\pipx\venvs\hermes-agent",
+        ):
+            assert config.is_pipx_install() is True
+
+    def test_unrelated_venv_is_not_pipx(self):
+        from hermes_cli import config
+
+        with patch.object(config.sys, "prefix", "/home/user/venvs/hermes-agent"), \
+             patch.object(config.sys, "executable", "/usr/bin/python3"):
+            assert config.is_pipx_install() is False
+
+
 class TestIsSitePackagesInstall:
     def test_exact_user_site_root_is_packaged(self, tmp_path):
         from hermes_cli import config
@@ -198,6 +225,26 @@ class TestRecommendedUpdateCommandForUvTool:
             "/usr/local/bin/python3.12 -m pip install --user --upgrade hermes-agent"
         )
 
+    def test_uv_tool_ownership_outranks_pipx_and_user_site(self):
+        from hermes_cli import config
+
+        with patch.object(config, "is_uv_tool_install", return_value=True), \
+             patch.object(config, "is_pipx_install", return_value=True), \
+             patch.object(config, "is_user_site_install", return_value=True):
+            cmd = config.recommended_update_command_for_method("pip")
+
+        assert cmd == "uv tool upgrade hermes-agent"
+
+    def test_pipx_ownership_outranks_user_site(self):
+        from hermes_cli import config
+
+        with patch.object(config, "is_uv_tool_install", return_value=False), \
+             patch.object(config, "is_pipx_install", return_value=True), \
+             patch.object(config, "is_user_site_install", return_value=True):
+            cmd = config.recommended_update_command_for_method("pip")
+
+        assert cmd == "pipx upgrade hermes-agent"
+
     def test_no_uv_falls_back_to_plain_pip(self):
         from hermes_cli import config
 
@@ -239,6 +286,22 @@ class TestCmdUpdatePipUsesUvTool:
             _cmd_update_pip(SimpleNamespace())
 
         assert mock_run.call_args[0][0] == ["/usr/local/bin/uv", "tool", "upgrade", "hermes-agent"]
+
+    @patch("subprocess.run")
+    def test_uv_tool_ownership_outranks_pipx_and_user_site(self, mock_run):
+        from hermes_cli.main import _cmd_update_pip
+
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("shutil.which", return_value="/usr/local/bin/uv"), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=True), \
+             patch("hermes_cli.config.is_pipx_install", return_value=True), \
+             patch("hermes_cli.config.is_user_site_install") as user_site:
+            _cmd_update_pip(SimpleNamespace())
+
+        assert mock_run.call_args[0][0] == [
+            "/usr/local/bin/uv", "tool", "upgrade", "hermes-agent"
+        ]
+        user_site.assert_not_called()
 
     @patch("subprocess.run")
     def test_runs_uv_pip_install_when_not_uv_tool(self, mock_run):
@@ -331,6 +394,26 @@ class TestCmdUpdatePipInstallLayouts:
         assert "env" not in mock_run.call_args.kwargs
 
     @patch("subprocess.run")
+    def test_pipx_ownership_outranks_user_site(self, mock_run):
+        from hermes_cli.main import _cmd_update_pip
+
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        def _which(name):
+            return {"uv": "/usr/bin/uv", "pipx": "/usr/bin/pipx"}.get(name)
+
+        with patch("shutil.which", side_effect=_which), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=True), \
+             patch("hermes_cli.config.is_user_site_install") as user_site:
+            _cmd_update_pip(SimpleNamespace())
+
+        assert mock_run.call_args[0][0] == [
+            "/usr/bin/pipx", "upgrade", "hermes-agent"
+        ]
+        user_site.assert_not_called()
+
+    @patch("subprocess.run")
     def test_pipx_layout_without_pipx_binary_treated_as_venv(
         self, mock_run, monkeypatch
     ):
@@ -419,6 +502,59 @@ class TestCmdUpdatePipInstallLayouts:
         mock_update_uv.assert_not_called()
         mock_ensure_uv.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("user_site_install", "expected_scheme"),
+        [(True, "nt_user"), (False, None)],
+    )
+    @patch("subprocess.run")
+    def test_windows_site_package_update_quarantines_installed_scripts_shim(
+        self,
+        mock_run,
+        monkeypatch,
+        tmp_path,
+        user_site_install,
+        expected_scheme,
+    ):
+        from hermes_cli import main as hm
+
+        scripts_dir = tmp_path / "Python312" / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        shim = scripts_dir / "hermes.exe"
+        shim.write_bytes(b"old")
+        monkeypatch.setattr(hm.sys, "executable", r"C:\Python312\python.exe")
+
+        def _get_path(name, scheme=None):
+            assert name == "scripts"
+            assert scheme == expected_scheme
+            return str(scripts_dir)
+
+        def _install(cmd, *, env=None):
+            assert not shim.exists()
+            shim.write_bytes(b"new")
+
+        with patch.object(hm, "_is_windows", return_value=True), \
+             patch.object(hm, "_load_console_script_names", return_value=["hermes"]), \
+             patch.object(hm, "_run_install_with_heartbeat", side_effect=_install) as install, \
+             patch("sysconfig.get_preferred_scheme", return_value="nt_user"), \
+             patch("sysconfig.get_path", side_effect=_get_path), \
+             patch("shutil.which", return_value=None), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=False), \
+             patch(
+                 "hermes_cli.config.is_user_site_install",
+                 return_value=user_site_install,
+             ):
+            hm._cmd_update_pip(SimpleNamespace())
+
+        install.assert_called_once()
+        cmd = install.call_args.args[0]
+        assert ("--user" in cmd) is user_site_install
+        assert shim.read_bytes() == b"new"
+        quarantined = list(scripts_dir.glob("hermes.exe.old.*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == b"old"
+        mock_run.assert_not_called()
+
 
 class TestCmdUpdateImplPackageRouting:
     @staticmethod
@@ -449,7 +585,7 @@ class TestCmdUpdateImplPackageRouting:
             tmp_path / "user-site", project_root
         )
 
-        with patch.object(hm, "_is_windows", return_value=False), \
+        with patch.object(hm, "_is_windows", return_value=True), \
              patch.object(hm, "_run_pre_update_backup"), \
              patch.object(hm, "_pause_windows_gateways_for_update", return_value=None), \
              patch.object(hm, "_cmd_update_pip") as update_pip, \
