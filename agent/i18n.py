@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import site
 import sysconfig
 import threading
 from functools import lru_cache
@@ -94,7 +95,11 @@ def _locales_dir() -> Path:
        sealed-packaging system) to point at the installed catalog directory.
     2. ``<repo-root>/locales`` -- source checkouts and ``pip install -e .``,
        where the working tree sits next to ``agent/``.
-    3. ``<sysconfig data|purelib|platlib>/locales`` -- pip wheel installs.
+    3. ``site.getuserbase()/locales`` -- active ``pip install --user`` layouts.
+       This path is only considered when this module itself is imported from
+       ``site.getusersitepackages()`` so a stale user catalog cannot override
+       a venv/system installation.
+    4. ``<sysconfig data|purelib|platlib>/locales`` -- pip wheel installs.
        setuptools ``data-files`` extracts ``locales/*.yaml`` under the
        interpreter's ``data`` scheme; the other schemes are checked as a
        safety net for nonstandard layouts.
@@ -119,12 +124,33 @@ def _locales_dir() -> Path:
     if source_dir.is_dir():
         return source_dir
 
+    # ``pip install --user`` puts package modules under
+    # ``~/.local/lib/pythonX.Y/site-packages`` but setuptools data-files under
+    # the user *base* (``~/.local/locales``) -- a path none of the sysconfig
+    # schemes below return. Check it explicitly, otherwise a --user install
+    # returns raw i18n keys (e.g. ``gateway.model.switched``) for every
+    # localized slash-command reply, approval prompt, /reset, /goal, etc.
+    try:
+        user_base = site.getuserbase()
+        user_site = site.getusersitepackages()
+        package_path = Path(__file__).resolve()
+        user_site_path = Path(user_site).resolve() if user_site else None
+        is_user_site_package = bool(
+            user_site_path and package_path.is_relative_to(user_site_path)
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        user_base = ""
+        is_user_site_package = False
+    if user_base and is_user_site_package:
+        candidate = Path(user_base) / "locales"
+        if candidate.is_dir():
+            return candidate
+
     # pip wheel install: data-files lands under the interpreter data scheme.
     # ``data`` (== sys.prefix in a venv) is where setuptools data-files extract
     # and is checked first. ``purelib``/``platlib`` (site-packages) are a safety
-    # net for nonstandard layouts. NOTE: this does NOT cover ``pip install
-    # --user`` (user scheme, ~/.local/locales) or ``pip install --target`` --
-    # both are out of scope; see the plan header.
+    # net for nonstandard layouts. NOTE: ``pip install --target`` (custom target
+    # dir) is still out of scope; see the plan header.
     for scheme in ("data", "purelib", "platlib"):
         raw = sysconfig.get_path(scheme)
         if not raw:
