@@ -555,6 +555,47 @@ class TestCmdUpdatePipInstallLayouts:
         assert quarantined[0].read_bytes() == b"old"
         mock_run.assert_not_called()
 
+    @patch("subprocess.run")
+    def test_windows_site_package_update_restores_shim_after_failure(
+        self,
+        mock_run,
+        monkeypatch,
+        tmp_path,
+    ):
+        from hermes_cli import main as hm
+
+        scripts_dir = tmp_path / "Python312" / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        shim = scripts_dir / "hermes.exe"
+        shim.write_bytes(b"old")
+        monkeypatch.setattr(hm.sys, "executable", r"C:\Python312\python.exe")
+
+        def _get_path(name, scheme=None):
+            assert name == "scripts"
+            assert scheme == "nt_user"
+            return str(scripts_dir)
+
+        def _install(cmd, *, env=None):
+            assert not shim.exists()
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with patch.object(hm, "_is_windows", return_value=True), \
+             patch.object(hm, "_load_console_script_names", return_value=["hermes"]), \
+             patch.object(hm, "_run_install_with_heartbeat", side_effect=_install), \
+             patch("sysconfig.get_preferred_scheme", return_value="nt_user"), \
+             patch("sysconfig.get_path", side_effect=_get_path), \
+             patch("shutil.which", return_value=None), \
+             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
+             patch("hermes_cli.config.is_pipx_install", return_value=False), \
+             patch("hermes_cli.config.is_user_site_install", return_value=True), \
+             pytest.raises(SystemExit) as exc_info:
+            hm._cmd_update_pip(SimpleNamespace())
+
+        assert exc_info.value.code == 1
+        assert shim.read_bytes() == b"old"
+        assert list(scripts_dir.glob("hermes.exe.old.*")) == []
+        mock_run.assert_not_called()
+
 
 class TestCmdUpdateImplPackageRouting:
     @staticmethod
