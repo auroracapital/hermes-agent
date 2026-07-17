@@ -1157,7 +1157,8 @@ export default function ModelsPage() {
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh]);
 
   useEffect(() => {
-    load();
+    const timer = setTimeout(load, 0);
+    return () => clearTimeout(timer);
   }, [load]);
 
   // Model assignments can change outside this page (config editor, chat

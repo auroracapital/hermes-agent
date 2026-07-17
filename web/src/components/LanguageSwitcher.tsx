@@ -1,12 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { BottomSheet } from "@nous-research/ui/ui/components/bottom-sheet";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
-import { useI18n } from "@/i18n/context";
-import { LOCALE_META } from "@/i18n";
+import { LOCALE_META, useI18n } from "@/i18n";
 import type { Locale } from "@/i18n";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +34,20 @@ export function LanguageSwitcher({ collapsed = false, dropUp = false }: Language
   const narrowViewport = useBelowBreakpoint(640);
   const useMobileSheet = Boolean(dropUp && narrowViewport);
 
+  const setDropdownNode = useCallback((node: HTMLDivElement | null) => {
+    dropdownRef.current = node;
+    if (!node) return;
+
+    node.style.removeProperty("bottom");
+    node.style.removeProperty("left");
+    if (!dropUp) return;
+
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    node.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+    node.style.left = `${rect.left}px`;
+  }, [dropUp]);
+
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
@@ -61,6 +74,24 @@ export function LanguageSwitcher({ collapsed = false, dropUp = false }: Language
   const current = LOCALE_META[locale];
   const allLocales = Object.entries(LOCALE_META) as Array<[Locale, typeof current]>;
   const sheetTitle = t.language.switchTo;
+  const dropdown = open && !useMobileSheet ? (
+    <div
+      ref={setDropdownNode}
+      aria-label={sheetTitle}
+      className={cn(
+        "min-w-[10rem] border border-border bg-popover shadow-md py-1 max-h-80 overflow-y-auto",
+        dropUp ? "fixed z-[100]" : "absolute z-50 right-0 top-full mt-1",
+      )}
+      role="listbox"
+    >
+      <LanguageSwitcherOptions
+        allLocales={allLocales}
+        locale={locale}
+        setLocale={setLocale}
+        setOpen={setOpen}
+      />
+    </div>
+  ) : null;
 
   return (
     <div ref={containerRef} className="relative inline-flex">
@@ -103,33 +134,7 @@ export function LanguageSwitcher({ collapsed = false, dropUp = false }: Language
         </BottomSheet>
       )}
 
-      {open && !useMobileSheet && (() => {
-        const rect = containerRef.current?.getBoundingClientRect();
-        const dropdown = (
-          <div
-            ref={dropdownRef}
-            aria-label={sheetTitle}
-            className={cn(
-              "min-w-[10rem] border border-border bg-popover shadow-md py-1 max-h-80 overflow-y-auto",
-              dropUp ? "fixed z-[100]" : "absolute z-50 right-0 top-full mt-1",
-            )}
-            role="listbox"
-            style={
-              dropUp && rect
-                ? { bottom: window.innerHeight - rect.top + 4, left: rect.left }
-                : undefined
-            }
-          >
-            <LanguageSwitcherOptions
-              allLocales={allLocales}
-              locale={locale}
-              setLocale={setLocale}
-              setOpen={setOpen}
-            />
-          </div>
-        );
-        return dropUp ? createPortal(dropdown, document.body) : dropdown;
-      })()}
+      {dropdown && (dropUp ? createPortal(dropdown, document.body) : dropdown)}
     </div>
   );
 }

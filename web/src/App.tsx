@@ -61,7 +61,8 @@ import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { ConfirmDialog } from "@nous-research/ui/ui/components/confirm-dialog";
 import { cn } from "@/lib/utils";
 import { SidebarFooter } from "@/components/SidebarFooter";
-import { SidebarStatusStrip, gatewayLine } from "@/components/SidebarStatusStrip";
+import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
+import { gatewayLine } from "@/components/sidebar-status";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { AuthWidget } from "@/components/AuthWidget";
@@ -909,12 +910,8 @@ function SidebarSystemActions({
   const [updateConfirmChecking, setUpdateConfirmChecking] = useState(false);
 
   useEffect(() => {
-    if (!updateConfirmOpen) {
-      setUpdateConfirmInfo(null);
-      return;
-    }
+    if (!updateConfirmOpen) return;
     let cancelled = false;
-    setUpdateConfirmChecking(true);
     api
       .checkHermesUpdate(false)
       .then((info) => {
@@ -930,6 +927,18 @@ function SidebarSystemActions({
       cancelled = true;
     };
   }, [updateConfirmOpen]);
+
+  const openUpdateConfirm = () => {
+    setUpdateConfirmInfo(null);
+    setUpdateConfirmChecking(true);
+    setUpdateConfirmOpen(true);
+  };
+
+  const closeUpdateConfirm = () => {
+    setUpdateConfirmOpen(false);
+    setUpdateConfirmInfo(null);
+    setUpdateConfirmChecking(false);
+  };
 
   const updateConfirmDescription = useMemo(() => {
     if (updateConfirmInfo?.behind && updateConfirmInfo.behind > 0) {
@@ -970,7 +979,7 @@ function SidebarSystemActions({
       return;
     }
     if (action === "update") {
-      setUpdateConfirmOpen(true);
+      openUpdateConfirm();
       return;
     }
     void runAction(action);
@@ -986,7 +995,7 @@ function SidebarSystemActions({
   };
 
   const confirmUpdate = () => {
-    setUpdateConfirmOpen(false);
+    closeUpdateConfirm();
     void runAction("update");
     navigate("/sessions");
     onNavigate();
@@ -1056,7 +1065,7 @@ function SidebarSystemActions({
         updateConfirmChecking ? t.common.loading : updateConfirmDescription
       }
       loading={pendingAction === "update" || updateConfirmChecking}
-      onCancel={() => setUpdateConfirmOpen(false)}
+      onCancel={closeUpdateConfirm}
       onConfirm={confirmUpdate}
       open={updateConfirmOpen}
       title={t.status.updateHermesConfirmTitle ?? `${t.status.updateHermes}?`}

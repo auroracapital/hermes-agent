@@ -34,6 +34,19 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
   const useMobileSheet = Boolean(dropUp && narrowViewport);
 
   const close = useCallback(() => setOpen(false), []);
+  const setDropdownNode = useCallback((node: HTMLDivElement | null) => {
+    dropdownRef.current = node;
+    if (!node) return;
+
+    node.style.removeProperty("bottom");
+    node.style.removeProperty("left");
+    if (!dropUp) return;
+
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    node.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+    node.style.left = `${rect.left}px`;
+  }, [dropUp]);
 
   useEffect(() => {
     if (!open) return;
@@ -59,6 +72,39 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
   const current = availableThemes.find((th) => th.name === themeName);
   const label = current?.label ?? themeName;
   const sheetTitle = t.theme?.title ?? "Theme";
+  const dropdown = open && !useMobileSheet ? (
+    <div
+      ref={setDropdownNode}
+      aria-label={sheetTitle}
+      className={cn(
+        "min-w-[240px] max-h-[70dvh] overflow-y-auto",
+        "border border-current/20 bg-background-base/95",
+        "shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]",
+        dropUp ? "fixed z-[100]" : "absolute z-50 right-0 top-full mt-1",
+      )}
+      role="listbox"
+    >
+      <div className="border-b border-current/20 px-3 py-2">
+        <Typography
+          className="text-display text-xs tracking-[0.12em] text-text-tertiary"
+        >
+          {sheetTitle}
+        </Typography>
+      </div>
+
+      <ThemeSwitcherOptions
+        availableThemes={availableThemes}
+        close={close}
+        setTheme={setTheme}
+        themeName={themeName}
+      />
+      <FontSection
+        fontChoices={fontChoices}
+        fontId={fontId}
+        setFont={setFont}
+      />
+    </div>
+  ) : null;
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -112,48 +158,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
         </BottomSheet>
       )}
 
-      {open && !useMobileSheet && (() => {
-        const rect = wrapperRef.current?.getBoundingClientRect();
-        const dropdown = (
-          <div
-            ref={dropdownRef}
-            aria-label={sheetTitle}
-            className={cn(
-              "min-w-[240px] max-h-[70dvh] overflow-y-auto",
-              "border border-current/20 bg-background-base/95",
-              "shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]",
-              dropUp ? "fixed z-[100]" : "absolute z-50 right-0 top-full mt-1",
-            )}
-            role="listbox"
-            style={
-              dropUp && rect
-                ? { bottom: window.innerHeight - rect.top + 4, left: rect.left }
-                : undefined
-            }
-          >
-            <div className="border-b border-current/20 px-3 py-2">
-              <Typography
-                className="text-display text-xs tracking-[0.12em] text-text-tertiary"
-              >
-                {sheetTitle}
-              </Typography>
-            </div>
-
-            <ThemeSwitcherOptions
-              availableThemes={availableThemes}
-              close={close}
-              setTheme={setTheme}
-              themeName={themeName}
-            />
-            <FontSection
-              fontChoices={fontChoices}
-              fontId={fontId}
-              setFont={setFont}
-            />
-          </div>
-        );
-        return dropUp ? createPortal(dropdown, document.body) : dropdown;
-      })()}
+      {dropdown && (dropUp ? createPortal(dropdown, document.body) : dropdown)}
     </div>
   );
 }

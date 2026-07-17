@@ -396,15 +396,32 @@ function SessionRow({
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (isExpanded && messages === null && !loading) {
+    if (!isExpanded || messages !== null) return;
+
+    let cancelled = false;
+    api
+      .getSessionMessages(session.id)
+      .then((resp) => {
+        if (!cancelled) setMessages(resp.messages);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isExpanded, session.id, messages]);
+
+  const handleToggle = () => {
+    if (!isExpanded && messages === null) {
+      setError(null);
       setLoading(true);
-      api
-        .getSessionMessages(session.id)
-        .then((resp) => setMessages(resp.messages))
-        .catch((err) => setError(String(err)))
-        .finally(() => setLoading(false));
     }
-  }, [isExpanded, session.id, messages, loading]);
+    onToggle();
+  };
 
   const sourceInfo = (session.source
     ? SOURCE_CONFIG[session.source]
@@ -526,7 +543,7 @@ function SessionRow({
     >
       <div
         className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-secondary/30"
-        onClick={onToggle}
+        onClick={handleToggle}
       >
         <span className="flex shrink-0 items-center pt-0.5">
           <Checkbox
@@ -842,11 +859,17 @@ export default function SessionsPage() {
   // baseline without triggering a redundant reload (mount already loads).
   const newestSeenRef = useRef<string | null>(null);
   const pageRef = useRef(page);
-  pageRef.current = page;
 
   useEffect(() => {
-    loadSessions(page);
-    refreshEmptyCount();
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadSessions(page);
+      refreshEmptyCount();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [loadSessions, page, refreshEmptyCount]);
 
   useEffect(() => {
@@ -903,6 +926,14 @@ export default function SessionsPage() {
     (value: string) => {
       setSearch(value);
       clearSelection();
+      if (value.trim()) {
+        setSearching(true);
+        setView("list");
+      } else {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        setSearchResults(null);
+        setSearching(false);
+      }
     },
     [clearSelection],
   );
@@ -918,13 +949,8 @@ export default function SessionsPage() {
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
-    if (!search.trim()) {
-      setSearchResults(null);
-      setSearching(false);
-      return;
-    }
+    if (!search.trim()) return;
 
-    setSearching(true);
     debounceRef.current = setTimeout(() => {
       api
         .searchSessions(search.trim())
@@ -935,6 +961,7 @@ export default function SessionsPage() {
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = null;
     };
   }, [search]);
 
@@ -1209,10 +1236,6 @@ export default function SessionsPage() {
     platformEntries.length > 0 || recentSessions.length > 0;
   const showList = view === "list" || isSearching || !showOverviewTab;
   const showPagination = showList && !searchResults && total > PAGE_SIZE;
-
-  useEffect(() => {
-    if (isSearching) setView("list");
-  }, [isSearching]);
 
   const alerts: { message: string; detail?: string }[] = [];
   if (status) {

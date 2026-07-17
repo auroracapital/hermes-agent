@@ -478,7 +478,8 @@ export default function AnalyticsPage() {
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh, showTokens]);
 
   useEffect(() => {
-    load();
+    const timer = setTimeout(load, 0);
+    return () => clearTimeout(timer);
   }, [load]);
 
   return (
