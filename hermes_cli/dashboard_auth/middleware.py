@@ -147,9 +147,10 @@ def _auto_sso_response(request: Request) -> Response | None:
       * the request is an HTML document navigation, not an ``/api/*`` fetch
         (a fetch() would follow the 302 into the cross-origin OAuth dance
         opaquely — same reason ``_unauth_response`` never redirects APIs);
-      * exactly ONE interactive provider is registered — with two or more we
-        can't pick for the user, so the ``/login`` chooser must render; with
-        zero there's nothing to redirect to;
+      * exactly ONE redirect-based interactive provider is registered — with
+        two or more we can't pick for the user, so the ``/login`` chooser must
+        render; with zero there's nothing to redirect to; a password provider
+        must render its credential form instead of entering the OAuth route;
       * the one-shot loop-guard marker is ABSENT. Its presence means we
         already bounced to the portal once and came back still
         unauthenticated (no portal session) — auto-redirecting again would
@@ -178,8 +179,10 @@ def _auto_sso_response(request: Request) -> Response | None:
     # list_session_providers() already filters on supports_session=True, so
     # token-only credentials (drain/service providers) are never candidates.
     providers = list_session_providers()
-    if len(providers) != 1:
+    if len(providers) != 1 or getattr(providers[0], "supports_password", False):
         # Zero → nothing to redirect to. Two+ → user must choose at /login.
+        # Password-only → /login owns the credential form; /auth/login would
+        # call its intentionally unimplemented OAuth start_login method.
         return None
 
     from hermes_cli.dashboard_auth.prefix import prefix_from_request
@@ -458,4 +461,3 @@ def _attempt_refresh(request: Request, *, refresh_token):
         if new_session is not None:
             return new_session, provider.name
     return None
-
